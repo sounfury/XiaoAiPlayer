@@ -1,0 +1,7 @@
+.env
+__pycache__/
+*.pyc
+.cache/
+.spotipy_cache
+.mi.token
+*.log
