@@ -1,12 +1,16 @@
 """小爱模块化助手入口。"""
 
 import asyncio
+from contextlib import suppress
 import logging
 import sys
 
 from config import Config
 from core.assistant import AssistantCore
 from core.jev import JevRouter
+from core.mi_account import MiLoginRequired
+from core.notifications import NotificationService
+from core.ssh_tunnel import maintain_reverse_tunnel
 from core.xiaoai import XiaoAiService
 from modules.spotify.module import SpotifyModule, run_spotify as _run_spotify
 from modules.spotify.service import SpotifyService
@@ -48,8 +52,19 @@ async def main_loop(config: Config):
         JevRouter(config.jev_api_key, config.jev_model, config.jev_min_confidence)
         if config.jev_api_key else None
     )
+    notifications = None
+    tunnel_task = None
     try:
         await xiaoai.initialize()
+        if config.hook_enabled:
+            notifications = NotificationService(config, xiaoai)
+            await notifications.start()
+            if config.hook_ssh_host:
+                tunnel_task = asyncio.create_task(
+                    maintain_reverse_tunnel(config.hook_ssh_host, config.hook_port,
+                                            config.hook_ssh_remote_port),
+                    name="notification-ssh-tunnel",
+                )
         spotify = None
         if config.spotify_client_id and config.spotify_client_secret:
             try:
@@ -72,8 +87,30 @@ async def main_loop(config: Config):
         )
         await core.poll_forever(config.poll_interval)
     finally:
-        if router:
-            await router.close()
+        try:
+            if tunnel_task:
+                tunnel_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await tunnel_task
+        finally:
+            try:
+                if notifications:
+                    await notifications.close()
+            finally:
+                try:
+                    if router:
+                        await router.close()
+                finally:
+                    await xiaoai.close()
+
+
+async def login_once(config: Config):
+    """前台交互登录：完成短信验证并保存登录态，供后台启动复用。"""
+    xiaoai = XiaoAiService(config.mi_user, config.mi_pass, config.mi_did, allow_otp=True)
+    try:
+        await xiaoai.initialize()
+        logger.info("小米账号登录成功，登录态已保存，之后开机后台启动无需再验证")
+    finally:
         await xiaoai.close()
 
 
@@ -86,7 +123,10 @@ def main():
         logger.error("配置错误: %s", exc)
         sys.exit(1)
     try:
-        asyncio.run(main_loop(config))
+        asyncio.run(login_once(config) if "--login" in sys.argv[1:] else main_loop(config))
+    except MiLoginRequired as exc:
+        logger.error("%s", exc)
+        sys.exit(1)
     except KeyboardInterrupt:
         logger.info("服务已停止")
 

@@ -45,6 +45,21 @@ class Config:
         default_factory=lambda: float(os.getenv("POLL_INTERVAL", "2"))
     )
 
+    # 可选的任务完成通知 webhook（由本机或外部调用方发送）。
+    hook_enabled: bool = field(
+        default_factory=lambda: os.getenv("HOOK_ENABLED", "false").lower() == "true"
+    )
+    hook_host: str = field(default_factory=lambda: os.getenv("HOOK_HOST", "127.0.0.1"))
+    hook_port: int = field(default_factory=lambda: int(os.getenv("HOOK_PORT", "8765")))
+    hook_token: str = field(default_factory=lambda: os.getenv("HOOK_TOKEN", ""))
+    hook_text: str = field(
+        default_factory=lambda: os.getenv("HOOK_TEXT", "{source}提醒你，{task}已经完成啦")
+    )
+    hook_ssh_host: str = field(default_factory=lambda: os.getenv("HOOK_SSH_HOST", ""))
+    hook_ssh_remote_port: int = field(
+        default_factory=lambda: int(os.getenv("HOOK_SSH_REMOTE_PORT", "8765"))
+    )
+
     # 唤醒关键词
     wakeup_keywords: list[str] = field(default_factory=list)
 
@@ -72,5 +87,17 @@ class Config:
             errors.append("JEV_MIN_CONFIDENCE 必须在 0 到 1 之间")
         if self.poll_interval <= 0 or self.app_scan_interval <= 0:
             errors.append("轮询和软件扫描间隔必须大于 0")
+        if self.hook_enabled:
+            from core.notifications import validate_hook_config
+            try:
+                validate_hook_config(self)
+            except ValueError as exc:
+                errors.append(str(exc))
+        if self.hook_enabled and self.hook_ssh_host:
+            if (self.hook_ssh_host.startswith("-")
+                    or any(c.isspace() for c in self.hook_ssh_host)):
+                errors.append("HOOK_SSH_HOST 必须是 SSH Host 别名")
+            if not 1 <= self.hook_ssh_remote_port <= 65535:
+                errors.append("HOOK_SSH_REMOTE_PORT 必须在 1 到 65535 之间")
         if errors:
             raise ValueError("配置缺失:\n  " + "\n  ".join(errors))

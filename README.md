@@ -7,6 +7,8 @@
 - `core/`：小爱连接、对话去重和轮询、Jev 语义路由、执行与音箱保护。
 - `modules/spotify/`：Spotify API、播放命令和原有规则回退。
 - `modules/windows/`：从开始菜单、注册表及常见安装目录发现软件并启动。
+- `core/notifications.py`：认证的通用任务完成 Hook，排队让小爱播报。
+- `integrations/pi/`：PiWeb 完成事件适配器，支持本机与 SSH 远端来源。
 
 ## 配置和运行
 
@@ -21,3 +23,9 @@
 Windows 软件清单每 `APP_SCAN_INTERVAL` 秒刷新一次。模型只能返回清单中的候选 ID，程序不会把语音或模型输出当作可执行路径。候选项超过 Jev 单次容量时会分批判断，结果互相冲突则回退精确名称匹配。开始菜单与常规安装目录之外的便携软件需要提供开始菜单快捷方式才能被发现。
 
 运行离线测试：`python -m unittest -q`。
+
+## PiWeb 任务完成播报
+
+运行 `python integrations/pi/install.py --ssh-host oracle`，重启 XiaoAiPlayer，再在已有 PiWeb 会话执行 `/reload` 或新建会话。任务最终成功完成后，Pi 插件发送来源、对话名和事件编号，由 XiaoAiPlayer 根据 `.env` 中的 `HOOK_TEXT` 统一生成播报，默认模板为「{source}提醒你，{task}已经完成啦」。Oracle 通过小爱进程维护的 SSH 反向隧道访问本机 Hook。
+
+接收端使用通用 HTTP 事件协议，后续可以接入其他任务来源。配置、接口与验证方法见 [任务完成通知](doc/task-completion-hook.md)。

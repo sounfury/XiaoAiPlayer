@@ -4,6 +4,7 @@ import asyncio
 import inspect
 import logging
 
+from core.mi_account import MiLoginRequired
 from core.module_base import CommandModule, PreparedAction
 
 logger = logging.getLogger(__name__)
@@ -97,7 +98,7 @@ class AssistantCore:
                 if conversation:
                     logger.info("收到小爱对话: %s", conversation.query)
                     await self.handle_query(conversation.query)
-            except asyncio.CancelledError:
+            except (asyncio.CancelledError, MiLoginRequired):
                 raise
             except Exception as exc:
                 logger.error("轮询异常: %s", exc, exc_info=True)
