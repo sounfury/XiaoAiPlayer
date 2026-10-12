@@ -3,6 +3,8 @@
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
+import spotipy
+
 from modules.spotify.parser import parse
 from main import _run_spotify, handle_command
 from modules.spotify.service import SpotifyService
@@ -71,9 +73,17 @@ class RoutingTests(unittest.TestCase):
             "name": "acg",
             "tracks": {"total": 160},
         }
+        self.service._sp.current_playback.side_effect = [
+            {"device": {"id": "local-pc"}, "context": None,
+             "actions": {"disallows": {"toggling_shuffle": True}}},
+            {"device": {"id": "local-pc"},
+             "context": {"uri": "spotify:playlist:acg-id"},
+             "shuffle_state": False, "actions": {"disallows": {}}},
+        ]
 
         with patch("modules.spotify.service.random.randrange", return_value=73):
-            result = self.service.play_playlist("acg-id", shuffle=True)
+            with patch("modules.spotify.service.time.sleep"):
+                result = self.service.play_playlist("acg-id", shuffle=True)
 
         self.service._sp.shuffle.assert_called_once_with(
             True, device_id="local-pc"
@@ -84,7 +94,96 @@ class RoutingTests(unittest.TestCase):
             offset={"position": 73},
         )
         self.service._sp.next_track.assert_not_called()
+        calls = [call[0] for call in self.service._sp.method_calls]
+        self.assertLess(calls.index("start_playback"), calls.index("shuffle"))
         self.assertEqual(result, "正在随机播放歌单: acg")
+
+    def test_disallowed_shuffle_does_not_prevent_playlist_playback(self):
+        self.service._device_id = "local-pc"
+        self.service._ensure_device = Mock()
+        self.service._sp.playlist.return_value = {"name": "acg", "tracks": {"total": 1}}
+        self.service._sp.current_playback.return_value = {
+            "device": {"id": "local-pc"},
+            "context": {"uri": "spotify:playlist:acg-id"},
+            "shuffle_state": False,
+            "actions": {"disallows": {"toggling_shuffle": True}},
+        }
+
+        result = self.service.play_playlist("acg-id", shuffle=True)
+
+        self.service._sp.start_playback.assert_called_once()
+        self.service._sp.shuffle.assert_not_called()
+        self.assertIn("正在播放歌单: acg", result)
+        self.assertIn("禁止切换随机模式", result)
+
+    def test_unconfirmed_playlist_context_does_not_toggle_shuffle(self):
+        self.service._device_id = "local-pc"
+        self.service._ensure_device = Mock()
+        self.service._sp.playlist.return_value = {"name": "acg", "tracks": {"total": 1}}
+        self.service._sp.current_playback.return_value = {
+            "device": {"id": "local-pc"}, "context": None,
+            "actions": {"disallows": {"toggling_shuffle": True}},
+        }
+
+        with patch("modules.spotify.service.time.sleep") as sleep:
+            result = self.service.play_playlist("acg-id", shuffle=True)
+
+        self.service._sp.start_playback.assert_called_once()
+        self.service._sp.shuffle.assert_not_called()
+        self.assertEqual(self.service._sp.current_playback.call_count, 6)
+        self.assertEqual(sleep.call_count, 5)
+        self.assertIn("暂未确认播放状态", result)
+
+    def test_already_shuffled_playlist_needs_no_toggle(self):
+        self.service._device_id = "local-pc"
+        self.service._ensure_device = Mock()
+        self.service._sp.playlist.return_value = {"name": "acg", "tracks": {"total": 1}}
+        self.service._sp.current_playback.return_value = {
+            "device": {"id": "local-pc"},
+            "context": {"uri": "spotify:playlist:acg-id"},
+            "shuffle_state": True,
+            "actions": {"disallows": {"toggling_shuffle": True}},
+        }
+
+        result = self.service.play_playlist("acg-id", shuffle=True)
+
+        self.service._sp.shuffle.assert_not_called()
+        self.assertEqual(result, "正在随机播放歌单: acg")
+
+    def test_shuffle_restriction_after_context_is_reported(self):
+        self.service._device_id = "local-pc"
+        self.service._ensure_device = Mock()
+        self.service._sp.playlist.return_value = {"name": "acg", "tracks": {"total": 1}}
+        self.service._sp.current_playback.return_value = {
+            "device": {"id": "local-pc"},
+            "context": {"uri": "spotify:playlist:acg-id"},
+            "shuffle_state": False,
+            "actions": {"disallows": {}},
+        }
+        self.service._sp.shuffle.side_effect = spotipy.SpotifyException(
+            403, -1, "Player command failed: Restriction violated"
+        )
+
+        result = self.service.play_playlist("acg-id", shuffle=True)
+
+        self.assertIn("禁止切换随机模式", result)
+
+    def test_other_shuffle_403_is_not_hidden(self):
+        self.service._device_id = "local-pc"
+        self.service._ensure_device = Mock()
+        self.service._sp.playlist.return_value = {"name": "acg", "tracks": {"total": 1}}
+        self.service._sp.current_playback.return_value = {
+            "device": {"id": "local-pc"},
+            "context": {"uri": "spotify:playlist:acg-id"},
+            "shuffle_state": False,
+            "actions": {"disallows": {}},
+        }
+        self.service._sp.shuffle.side_effect = spotipy.SpotifyException(
+            403, -1, "Insufficient client scope"
+        )
+
+        with self.assertRaises(spotipy.SpotifyException):
+            self.service.play_playlist("acg-id", shuffle=True)
 
     def test_only_selects_named_computer(self):
         self.service._sp.devices.return_value = {"devices": [

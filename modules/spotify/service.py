@@ -180,7 +180,7 @@ class SpotifyService:
             logger.info("▶ 播放")
         except spotipy.SpotifyException as e:
             if e.http_status == 403:
-                logger.warning("播放失败：可能没有活跃设备或无Premium")
+                logger.warning("Spotify 拒绝恢复播放 (HTTP 403): %s", e)
             raise
 
     def pause(self):
@@ -296,9 +296,6 @@ class SpotifyService:
         name = playlist.get("name", "未知歌单")
         track_total = playlist.get("tracks", {}).get("total", 0)
 
-        # 先设置 shuffle 状态
-        self._sp.shuffle(shuffle, device_id=self._device_id)
-
         # 随机模式直接选择一个随机起点。启动后立刻调用 next_track 容易被
         # Spotify 判定为 Restriction violated，且会造成一次多余的切歌。
         offset = (
@@ -306,11 +303,43 @@ class SpotifyService:
             if shuffle and track_total > 0
             else None
         )
+        context_uri = f"spotify:playlist:{playlist_id}"
         self._sp.start_playback(
             device_id=self._device_id,
-            context_uri=f"spotify:playlist:{playlist_id}",
+            context_uri=context_uri,
             offset=offset,
         )
+
+        # 单曲播放或空闲时可能没有播放上下文，此时 Spotify 禁止切换随机模式。
+        # 先确认目标设备已进入新歌单，再读取当前允许的操作。
+        playback = None
+        for attempt in range(6):
+            playback = self._sp.current_playback()
+            if (
+                playback
+                and (playback.get("device") or {}).get("id") == self._device_id
+                and (playback.get("context") or {}).get("uri") == context_uri
+            ):
+                break
+            if attempt < 5:
+                time.sleep(0.5)
+        else:
+            logger.warning("歌单播放已发送，但未确认目标设备进入歌单上下文: %s", context_uri)
+            return f"已请求播放歌单: {name}；暂未确认播放状态，随机模式未切换"
+
+        if playback.get("shuffle_state") != shuffle:
+            disallows = (playback.get("actions") or {}).get("disallows") or {}
+            if disallows.get("toggling_shuffle"):
+                logger.warning("Spotify 当前禁止切换随机模式: %s", context_uri)
+                return f"正在播放歌单: {name}；Spotify 当前禁止切换随机模式"
+            try:
+                self._sp.shuffle(shuffle, device_id=self._device_id)
+            except spotipy.SpotifyException as e:
+                if e.http_status != 403 or "Restriction violated" not in str(e):
+                    raise
+                logger.warning("Spotify 拒绝切换随机模式: %s", e)
+                return f"正在播放歌单: {name}；Spotify 当前禁止切换随机模式"
+
         mode = "随机播放" if shuffle else "播放"
         msg = f"正在{mode}歌单: {name}"
         logger.info(msg)
