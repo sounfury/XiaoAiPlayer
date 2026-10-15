@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { attachNotifier, postNotification, isPiWeb, conversationName } from "./xiaoai-hook.js";
+import { attachNotifier, postNotification, isPiWeb, conversationName, persistedSessionName } from "./xiaoai-hook.js";
 
 function setup(config = {}) {
   const handlers = new Map();
@@ -81,15 +81,35 @@ test("任务结束时发送最新对话名，忽略遗留的插件模板配置",
   }
 });
 
-test("未命名对话使用首条用户消息，清理控制字符并限制为 120 字", () => {
+test("未命名对话使用首条用户消息前 30 字，清理控制字符和注入标签", () => {
+  let first = [{type: "image"}, {type: "text", text: "测试\n通知\u0000"}];
   const ctx = {sessionManager: {getEntries: () => [
     {type: "message", message: {role: "assistant", content: "ignore"}},
-    {type: "message", message: {role: "user", content: [{type: "image"}, {type: "text", text: "测试\n通知\u0000"}]}}
+    {type: "message", message: {role: "user", content: first}}
   ]}};
-  assert.equal(conversationName({}, ctx), "测试 通知");
-  assert.equal(conversationName({getSessionName: () => "显式标题"}, ctx), "显式标题");
+  const none = () => "";
+  assert.equal(conversationName({}, ctx, none), "测试 通知");
+  assert.equal(conversationName({getSessionName: () => "显式标题"}, ctx, none), "显式标题");
+  first.splice(0, 2, {type: "text", text: '<skill name="ssh">\n很长的技能正文\n</skill>\n\n连上服务器' + "啊".repeat(50)});
+  assert.equal(conversationName({}, ctx, none), "连上服务器" + "啊".repeat(25));
+  first.splice(0, 1, {type: "text", text: "You are an expert coding assistant operating inside pi"});
+  assert.equal(conversationName({}, ctx, none), "当前对话");
   ctx.sessionManager.getSessionName = () => "🎵".repeat(150);
-  assert.equal(Array.from(conversationName({}, ctx)).length, 120);
+  assert.equal(Array.from(conversationName({}, ctx, none)).length, 80);
+});
+
+test("优先使用会话文件中最新的 session_info（PiWeb 重命名不更新内存）", () => {
+  const lines = [
+    JSON.stringify({type: "session_info", name: "旧标题"}),
+    JSON.stringify({type: "message", message: {role: "user", content: "提到 \"session_info\" 的消息"}}),
+    "{半行损坏 \"session_info\"",
+    JSON.stringify({type: "session_info", name: "新标题"}),
+  ].join("\n");
+  assert.equal(persistedSessionName("/s.jsonl", () => lines), "新标题");
+  assert.equal(persistedSessionName(undefined), "");
+  assert.equal(persistedSessionName("/missing", () => { throw new Error("ENOENT"); }), "");
+  const ctx = {sessionManager: {getSessionFile: () => "/s.jsonl", getSessionName: () => "内存旧名"}};
+  assert.equal(conversationName({}, ctx, (file) => persistedSessionName(file, () => lines)), "新标题");
 });
 
 test("重试携带同一事件 ID 和 Bearer 令牌", async () => {

@@ -29,18 +29,40 @@ export function isPiWeb(env = process.env, argv = process.argv) {
   return argv.slice(1).some((arg) => /(?:^|[\\/])pi-web-ui[\\/](?:bin[\\/]pi-web-ui\.mjs|(?:dist[\\/])?server[\\/]index\.js)$/.test(arg));
 }
 
-export function conversationName(pi, ctx) {
-  const clean = (value) => typeof value === "string"
-    ? Array.from(value.replace(/[\p{Cc}\p{Cf}]/gu, " ").replace(/\s+/g, " ").trim()).slice(0, 120).join("")
+// PiWeb 重命名会另开 SessionManager 写 session_info，运行中会话的内存状态看不到，
+// 因此以会话文件里最后一条 session_info 为准。
+export function persistedSessionName(file, read = readFileSync) {
+  if (!file) return "";
+  let name = "";
+  try {
+    for (const line of read(file, "utf8").split("\n")) {
+      if (!line.includes('"session_info"')) continue;
+      try {
+        const entry = JSON.parse(line);
+        if (entry.type === "session_info" && typeof entry.name === "string") name = entry.name;
+      } catch {}
+    }
+  } catch {}
+  return name;
+}
+
+export function conversationName(pi, ctx, readName = persistedSessionName) {
+  const clean = (value, max = 80) => typeof value === "string"
+    ? Array.from(value.replace(/[\p{Cc}\p{Cf}]/gu, " ").replace(/\s+/g, " ").trim()).slice(0, max).join("")
     : "";
-  const name = clean(ctx.sessionManager.getSessionName?.()) || clean(pi.getSessionName?.());
+  let file;
+  try { file = ctx.sessionManager.getSessionFile?.(); } catch {}
+  const name = clean(readName(file)) || clean(ctx.sessionManager.getSessionName?.()) || clean(pi.getSessionName?.());
   if (name) return name;
-  // 与未命名会话的显示方式一致：使用首条用户消息，不包含附件或工具内容。
+  // 与 PiWeb 未命名会话的显示方式一致：首条用户消息前 30 字，去掉注入的 <skill> 等标签块。
   const first = ctx.sessionManager.getEntries?.().find((entry) =>
     entry.type === "message" && entry.message?.role === "user");
   const content = first?.message?.content;
-  return clean(typeof content === "string" ? content :
-    Array.isArray(content) ? content.filter((part) => part.type === "text").map((part) => part.text).join(" ") : "") || "当前对话";
+  const text = (typeof content === "string" ? content :
+    Array.isArray(content) ? content.filter((part) => part.type === "text").map((part) => part.text).join(" ") : "")
+    .replace(/<([\w-]+)(?:\s[^>]*)?>[\s\S]*?<\/\1>/g, " ");
+  if (/^\s*You are an? /i.test(text)) return "当前对话";
+  return clean(text, 30) || "当前对话";
 }
 
 export async function postNotification(config, payload, fetchImpl = fetch) {
@@ -63,6 +85,8 @@ export async function postNotification(config, payload, fetchImpl = fetch) {
       }
       throw new Error(`通知接口暂时不可用 (${response.status})`);
     } catch (error) {
+      // 隧道没连（对端没开机）时本地端口无人监听：属于正常离线，不重试。
+      if (error.cause?.code === "ECONNREFUSED") throw Object.assign(error, { offline: true });
       if (error.permanent || attempt === 2) throw error;
       await new Promise((resolve) => setTimeout(resolve, 500 * (attempt + 1)));
     }
@@ -121,6 +145,10 @@ export function attachNotifier(pi, options = {}) {
       await send(config, payload);
       debug("sent", { source });
     } catch (error) {
+      if (error.offline) {
+        debug("skip_offline");
+        return;
+      }
       debug("send_failed", { name: error.name });
       console.error("[xiaoai-hook] 完成通知发送失败，请检查接口、令牌和 SSH 隧道", error.name);
       try {
